@@ -1,0 +1,125 @@
+---
+title: "Practical Machine Learning - Project"
+output: html_document
+---
+\begin{center}
+\textit{Document prepared by RaphT in February 2015}
+\end{center}
+
+
+## Introduction
+This document has been prepared as part of the assignments for the Practical Machine Learning course on [Coursera](http://www.coursera.org/course/predmachlearn). The project consists in predicting the manner in which a number of participants did barbell lifts.
+
+## Data loading and cleaning
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+```{r, echo = FALSE,results='hide',message=FALSE, warning=FALSE}
+library(ggplot2); library(caret);library(randomForest)
+
+#Load data
+url = "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+trainingSet = read.csv(file=url)
+
+url = "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+predictionSet = read.csv(file=url)
+```
+The data used in this assignment has been generously provided by http://groupware.les.inf.puc-rio.br/har. It contains both a training set (19622 observations) and a test set (20 observations). In both sets quite a few of the columns are empty so the first step in the analysis is to remove them (taking care of removing the same columns in both sets).
+```{r, warnings = FALSE}
+removedColumns = colSums(is.na(trainingSet)) == 0 & colSums(is.na(predictionSet)) == 0
+trainingSet = trainingSet[,removedColumns]
+predictionSet = predictionSet[,removedColumns]
+```
+Furthermore, some columns would not be a sensible predictor of how the exercise were performed. They are removed as well on both sets.
+```{r}
+removedCol = c("user_name","raw_timestamp_part_1","raw_timestamp_part_2",
+               "cvtd_timestamp","new_window","num_window","X")
+trainingSet = trainingSet[,!names(trainingSet) %in% removedCol]
+predictionSet = predictionSet[,!names(predictionSet) %in% removedCol]
+```
+We thus end up with two data sets of 53 columns each. The last column of the training data set is "classe", which is the assessment of the manner in which the exercise was performed. In the test data set, it is "problem_id", included for the submission of the results.
+
+Finally, it seems a good idea to scale and center the predictors in both data sets.
+```{r}
+preProcValues <- preProcess(trainingSet[,1:52], method = c("center", "scale"))
+trainingSet[,1:52] <- predict(preProcValues, trainingSet[,1:52])
+predictionSet[,1:52] <- predict(preProcValues, predictionSet[,1:52])
+```
+
+##Model building
+The strategy here will be to divide the training set in two parts: one to train the model and the other to validate it (setting the seed for reproducibility).
+```{r}
+set.seed(33)
+inTrain = createDataPartition(trainingSet$classe, p = 0.90)[[1]]
+training = trainingSet[ inTrain,]
+testing = trainingSet[-inTrain,]
+```
+The first step in moldel building is to choose an algorithm. Random forest is an obvious choice, generalized linear model is not possible since classe is a factor variable. More complicated method may be possible but after a little experimentation it appears that the processing time would be (very) long so I'll stick to random forest.
+
+We obviously want to attain a very good prediction but we also want to limit the processing time. This may be possible by carefully selecting the implementation of the algorithm (for instance, method = "rf" in caret is slower than randomForest), by tuning the parameters of the algorithm or by limiting the number of predictor variables.
+
+We'll test four models: a first model based on the randomForest function, a second model derived from the first with a limitation of the number of trees, a third derived from the second but using only about half the predictor variables and a fourth based on the train function of the caret package. In this last model, the number of trees is limited to keep the processing time moderate. Note that profiling functions are used to measure the processing time.
+```{r}
+Rprof(".\\randomForest.out")
+model1 = randomForest(training$classe~.,importance = T, do.trace=F, data = training)
+Rprof(NULL)
+conf1 = confusionMatrix(predict(model1,newdata=testing),testing$classe)
+
+Rprof(".\\randomForest2.out")
+model2 = randomForest(training$classe~.,importance = T, do.trace=F, ntree = 100, data = training)
+Rprof(NULL)
+conf2 = confusionMatrix(predict(model2,newdata=testing),testing$classe)
+
+Rprof(".\\randomForest2.2.out")
+model2.2 = randomForest(training$classe~.,importance = T, do.trace=F, ntree = 100, data = training[,c(1:20,53)])
+Rprof(NULL)
+conf2.2 = confusionMatrix(predict(model2.2,newdata=testing[,c(1:20,53)]),testing[,c(1:20,53)]$classe)
+
+Rprof(".\\rf.out")
+model3 = train(training$classe~., method="rf", do.trace=F, data = training, ntree = 100,trControl = trainControl())
+Rprof(NULL)
+conf3 = confusionMatrix(predict(model3,newdata=testing),testing$classe)
+
+summary = data.frame(Model = c("Model 1","Model 2","Model 2.2","Model 3"), 
+                     Accuracy = c(conf1$overall[1],conf2$overall[1],conf2.2$overall[1],
+                                  conf3$overall[1]), 
+                     Duration = c(summaryRprof(".\\randomForest.out")$sampling.time,
+                                  summaryRprof(".\\randomForest2.out")$sampling.time,
+                                  summaryRprof(".\\randomForest2.2.out")$sampling.time,
+                                  summaryRprof(".\\rf.out")$sampling.time),
+                     OOB = c(100*(1-sum(training$classe == predict(model1,OOB=T))/nrow(training)),
+                             100*(1-sum(training$classe == predict(model2,OOB=T))/nrow(training)),
+                             100*(1-sum(training$classe == predict(model2.2,OOB=T))/nrow(training)),
+                             100*(1-sum(training$classe == predict(model3,
+                                                                   newdata = training))/nrow(training))))
+summary
+```
+It appears that all three models with all predictors have an accuracy (in the test set) in excess to 99%. Only using the first 20 predictors decreases the accuracy below 99%. Note that the run time between the different may be vastly different (a more detailed analysis of the out-of-sample error can be done by inspecting the full result of the call to confusionMatrix).
+
+##Prediction
+
+Let's use two of our models to predict the results in *predictionSet*.
+```{r}
+answers = data.frame(model1 = predict(model1,newdata=predictionSet))
+answers = cbind(answers, data.frame(model2 = predict(model2,newdata=predictionSet)))
+answers = cbind(answers, data.frame(model2.2 = predict(model2.2,newdata=predictionSet)))
+answers = cbind(answers, data.frame(model3 = predict(model3,newdata=predictionSet)))
+head(answers, n=5)
+```
+It appears that for this limited set the prediction is independant of the model chosen.
+
+##Wrapping up and conclusion
+The predictions above ought to be submitted to a webpage as part of the assignment. Here's the script used to do so.
+```{r, eval = F}
+setwd("E:\\Documents\\Stats")
+answers = predict(model2,newdata=predictionSet)
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+It appears that the 20 samples from the *predictionSet* are correctly predicted.
